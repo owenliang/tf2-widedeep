@@ -154,15 +154,16 @@ def build_model():
     dnn_optimizer = tf.keras.optimizers.Adam()
 
     wide_deep_model = tf.keras.experimental.WideDeepModel(linear_model, dnn_model, activation='sigmoid')
-    wide_deep_model.compile(optimizer=dnn_optimizer,  # [linear_optimizer,dnn_optimizer]
+    wide_deep_model.compile(optimizer=[linear_optimizer,dnn_optimizer],
                             loss=tf.keras.losses.BinaryCrossentropy(),
                             metrics=tf.keras.metrics.BinaryAccuracy())
     return wide_deep_model
 
 def train_model(model, dataset):
-    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir='./tensorboard', histogram_freq=1)
-    model.fit(dataset.batch(100).shuffle(100), epochs=100, callbacks=[tensorboard_callback])
-    tf.saved_model.save(model, 'model/{}'.format(int(time.time())))
+    version = int(time.time())
+    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir='./tensorboard/{}'.format(version), histogram_freq=1)    # tensorboard --logdir=./tensorboard
+    model.fit(dataset.batch(100).shuffle(100), epochs=10000, callbacks=[tensorboard_callback])
+    model.save('model/{}'.format(version), save_format='tf', include_optimizer=False) # two optimizer in wide&deep can not be serialized, excluding optimizer is ok for prediction
 
 # csv转tfrecords文件
 csv_to_tfrecords('train.csv', 'train.tfrecords')
