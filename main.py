@@ -145,9 +145,11 @@ def build_model():
     linear_optimizer = tf.keras.optimizers.Ftrl(l1_regularization_strength=0.5)
 
     dnn_feature_layer = tf.keras.layers.DenseFeatures(dnn_features)
+    dnn_norm_layer = tf.keras.layers.BatchNormalization()   # important for deep
     dnn_dense_layer1 = tf.keras.layers.Dense(units=128, activation='relu')
     dnn_dense_layer2 =  tf.keras.layers.Dense(units=1)
     output = dnn_feature_layer(input_layer)
+    output = dnn_norm_layer(output) # this will break the tensorboard graph because of unfixed bug
     output = dnn_dense_layer1(output)
     output = dnn_dense_layer2(output)
     dnn_model =  tf.keras.Model(inputs=list(input_layer.values()), outputs=[output])
@@ -162,7 +164,7 @@ def build_model():
 def train_model(model, dataset):
     version = int(time.time())
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir='./tensorboard/{}'.format(version), histogram_freq=1)    # tensorboard --logdir=./tensorboard
-    model.fit(dataset.batch(100).shuffle(100), epochs=10000, callbacks=[tensorboard_callback])
+    model.fit(dataset.batch(100).shuffle(100), epochs=2000, callbacks=[tensorboard_callback])
     model.save('model/{}'.format(version), save_format='tf', include_optimizer=False) # two optimizer in wide&deep can not be serialized, excluding optimizer is ok for prediction
 
 # csv转tfrecords文件
