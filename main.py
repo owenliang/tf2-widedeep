@@ -1,5 +1,6 @@
 import pandas as pd
 import tensorflow as tf
+import time
 
 # 模型输入/输出
 feature_spec = {
@@ -11,8 +12,38 @@ feature_spec = {
     'Parch': {'default': -1, 'type': 'int'},
     'Fare': {'default': -1, 'type': 'float'},
     'Embarked': {'default': '', 'type': 'str'},
+    'Ticket': {'default': '', 'type': 'str'}
 }
 label_name = 'Survived'
+
+# 特征预处理
+feature_column_spec = {
+    # 连续值, 只进入deep
+    'num': [
+        {'feature': 'Age'},
+        {'feature': 'SibSp'},
+        {'feature': 'Parch'},
+        {'feature': 'Fare'}
+    ],
+
+    # 类别，onehot进入wide完成记忆，embedding进入deep完成扩展
+    'cate': [
+        {'feature': 'Sex', 'vocab': ['male', 'female'], 'embedding': 10},
+        {'feature': 'Pclass', 'vocab': [1, 2, 3], 'embedding': 10},
+        {'feature': 'Embarked', 'vocab': ['S', 'C', 'Q'], 'embedding': 10},
+    ],
+    'hash': [
+        {'feature': 'Ticket', 'bucket': 10, 'embedding': 10}
+    ],
+    'bucket': [
+        {'feature': 'Age', 'boundaries': [10, 20, 30, 40, 50, 60, 70, 80, 90], 'embedding': 10}
+    ],
+
+    # 人工交叉：进入wide
+    'cross': [
+        {'feature': ['Age#bucket', 'Sex#cate'], 'bucket': 10}
+    ]
+}
 
 def csv_to_tfrecords(csv, tfrecords):
     df = pd.read_csv(csv)
@@ -56,7 +87,88 @@ def tfrecords_to_dataset(tfrecords_pattern):
     )
     return dataset
 
+def build_feature_columns():
+    num_feature_arr = []
+    onehot_feature_arr = []
+    embedding_feature_arr = []
+
+    base_cate_map = {}
+    for num_feature in feature_column_spec['num']:
+        num_feature_arr.append(tf.feature_column.numeric_column(num_feature['feature']))
+    for cate_feature in feature_column_spec['cate']:
+        base_cate_map[cate_feature['feature'] + '#cate'] = (tf.feature_column.categorical_column_with_vocabulary_list(cate_feature['feature'], cate_feature['vocab']), cate_feature)
+    for hash_feature in feature_column_spec['hash']:
+        base_cate_map[hash_feature['feature'] + '#hash'] = (tf.feature_column.categorical_column_with_hash_bucket(hash_feature['feature'], hash_feature['bucket']), hash_feature)
+    for bucket_feature in feature_column_spec['bucket']:
+        num_feature = tf.feature_column.numeric_column(bucket_feature['feature'])
+        base_cate_map[bucket_feature['feature'] + '#bucket'] = (tf.feature_column.bucketized_column(num_feature, boundaries=bucket_feature['boundaries']), bucket_feature)
+
+    cross_cate_map = {}
+    for cross_feature in feature_column_spec['cross']:
+        cols = []
+        for col_name in cross_feature['feature']:
+            column, spec = base_cate_map[col_name]
+            cols.append(column)
+        cross_cate_map['&'.join(cross_feature['feature']) + '#cross'] = tf.feature_column.crossed_column(cols, hash_bucket_size=cross_feature['bucket'])
+
+    for cate_name in base_cate_map:
+        column, spec = base_cate_map[cate_name]
+        onehot_feature_arr.append(tf.feature_column.indicator_column(column))
+        embedding_feature_arr.append(tf.feature_column.embedding_column(column, spec['embedding']))
+    for cross_cate_name in cross_cate_map:
+        cross_feature_col = cross_cate_map[cross_cate_name]
+        onehot_feature_arr.append(tf.feature_column.indicator_column(cross_feature_col))
+
+    return onehot_feature_arr, num_feature_arr + embedding_feature_arr
+
+def build_model():
+    linear_features, dnn_features = build_feature_columns()
+
+    input_layer = {}
+    for feature_name in feature_spec:
+        if feature_name == label_name:
+            continue
+        spec = feature_spec[feature_name]
+        if spec['type'] == 'int':
+            input_feature = tf.keras.Input((), name=feature_name, dtype=tf.int64)
+        elif spec['type'] == 'float':
+            input_feature = tf.keras.Input((), name=feature_name, dtype=tf.float32)
+        elif spec['type'] == 'str':
+            input_feature = tf.keras.Input((), name=feature_name, dtype=tf.string)
+        input_layer[feature_name] = input_feature
+
+    linear_feature_layer = tf.keras.layers.DenseFeatures(linear_features)
+    linear_dense_layer1 = tf.keras.layers.Dense(units=1)
+    output = linear_feature_layer(input_layer)
+    output = linear_dense_layer1(output)
+    linear_model = tf.keras.Model(inputs=list(input_layer.values()), outputs=[output])
+    linear_optimizer = tf.keras.optimizers.Ftrl(l1_regularization_strength=0.5)
+
+    dnn_feature_layer = tf.keras.layers.DenseFeatures(dnn_features)
+    dnn_dense_layer1 = tf.keras.layers.Dense(units=128, activation='relu')
+    dnn_dense_layer2 =  tf.keras.layers.Dense(units=1)
+    output = dnn_feature_layer(input_layer)
+    output = dnn_dense_layer1(output)
+    output = dnn_dense_layer2(output)
+    dnn_model =  tf.keras.Model(inputs=list(input_layer.values()), outputs=[output])
+    dnn_optimizer = tf.keras.optimizers.Adam()
+
+    wide_deep_model = tf.keras.experimental.WideDeepModel(linear_model, dnn_model, activation='sigmoid')
+    wide_deep_model.compile(optimizer=dnn_optimizer,  # [linear_optimizer,dnn_optimizer]
+                            loss=tf.keras.losses.BinaryCrossentropy(),
+                            metrics=tf.keras.metrics.BinaryAccuracy())
+    return wide_deep_model
+
+def train_model(model, dataset):
+    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir='./tensorboard', histogram_freq=1)
+    model.fit(dataset.batch(100).shuffle(100), epochs=100, callbacks=[tensorboard_callback])
+    tf.saved_model.save(model, 'model/{}'.format(int(time.time())))
+
 # csv转tfrecords文件
 csv_to_tfrecords('train.csv', 'train.tfrecords')
 # 加载tfrecords文件为dataset
 dataset = tfrecords_to_dataset('train.tfrecords')
+# 创建wide&deep model
+wide_deep_model = build_model()
+# 训练模型
+train_model(wide_deep_model, dataset)
